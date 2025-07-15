@@ -5,3 +5,8 @@ pandas
 python-docx
 PyMuPDF
 xlsxwriter
+streamlit
+    pandas
+    python-docx
+    PyMuPDF
+    nltk
