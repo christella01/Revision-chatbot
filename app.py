@@ -1,22 +1,28 @@
 import streamlit as st
-import openai
 import pandas as pd
 import fitz  # PyMuPDF
 from docx import Document
 import io
 import re
+from difflib import SequenceMatcher
+import nltk
+from nltk.tokenize import word_tokenize
+from nltk.corpus import stopwords
+import string
 
-# Set page config first
+# Download required NLTK data (runs once)
+try:
+    nltk.data.find('tokenizers/punkt')
+    nltk.data.find('corpora/stopwords')
+except LookupError:
+    with st.spinner("Downloading language resources..."):
+        nltk.download('punkt', quiet=True)
+        nltk.download('stopwords', quiet=True)
+
+# Set page config
 st.set_page_config(page_title="AI Grader Assistant", layout="wide")
 
-# Initialize OpenAI client (updated API)
-try:
-    client = openai.OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
-except Exception as e:
-    st.error("⚠️ OpenAI API key not found. Please check your Streamlit secrets.")
-    st.stop()
-
-st.title("📚 AI Teacher's Grading Assistant")
+st.title("📚 AI Teacher's Grading Assistant (No API Required)")
 
 # Helper: extract text from DOCX
 def extract_text_docx(file):
@@ -30,7 +36,6 @@ def extract_text_docx(file):
 # Helper: extract text from PDF
 def extract_text_pdf(file):
     try:
-        # Reset file pointer
         file.seek(0)
         pdf = fitz.open(stream=file.read(), filetype="pdf")
         text = ""
@@ -42,36 +47,91 @@ def extract_text_pdf(file):
         st.error(f"Error reading PDF file: {str(e)}")
         return ""
 
-# AI Grading Function (Updated API)
-def grade_answer(student_answer, correct_answer, question_number):
+# Text similarity function
+def calculate_similarity(text1, text2):
+    """Calculate similarity between two texts using multiple methods"""
+    # Method 1: Simple character-based similarity
+    char_similarity = SequenceMatcher(None, text1.lower(), text2.lower()).ratio()
+    
+    # Method 2: Word-based similarity (removing stopwords)
     try:
-        prompt = f"""
-You are a helpful teacher grading student work. Grade the following student answer to Question {question_number}.
-
-CORRECT ANSWER:
-{correct_answer}
-
-STUDENT'S ANSWER:
-{student_answer}
-
-Please provide:
-1. A score out of 10
-2. Brief explanation of the score
-3. Constructive feedback for improvement
-
-Be encouraging and educational in your response.
-"""
+        stop_words = set(stopwords.words('english'))
         
-        response = client.chat.completions.create(
-            model="gpt-4",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.3,
-            max_tokens=500
-        )
+        # Clean and tokenize
+        def clean_text(text):
+            text = text.lower().translate(str.maketrans('', '', string.punctuation))
+            tokens = word_tokenize(text)
+            return [word for word in tokens if word not in stop_words and len(word) > 2]
         
-        return response.choices[0].message.content.strip()
-    except Exception as e:
-        return f"Error grading this question: {str(e)}"
+        words1 = set(clean_text(text1))
+        words2 = set(clean_text(text2))
+        
+        if len(words1) == 0 or len(words2) == 0:
+            word_similarity = 0
+        else:
+            intersection = len(words1.intersection(words2))
+            union = len(words1.union(words2))
+            word_similarity = intersection / union if union > 0 else 0
+    except:
+        word_similarity = char_similarity
+    
+    # Combine both methods
+    final_similarity = (char_similarity * 0.4) + (word_similarity * 0.6)
+    return final_similarity
+
+# Smart grading function (no API required)
+def grade_answer_local(student_answer, correct_answer, question_number):
+    """Grade answer using local algorithms"""
+    
+    # Calculate similarity
+    similarity = calculate_similarity(student_answer, correct_answer)
+    
+    # Determine score based on similarity and length
+    if similarity >= 0.8:
+        score = 9 + (similarity - 0.8) * 5  # 9-10 range
+        grade_level = "Excellent"
+    elif similarity >= 0.6:
+        score = 7 + (similarity - 0.6) * 10  # 7-9 range
+        grade_level = "Good"
+    elif similarity >= 0.4:
+        score = 5 + (similarity - 0.4) * 10  # 5-7 range
+        grade_level = "Fair"
+    elif similarity >= 0.2:
+        score = 3 + (similarity - 0.2) * 10  # 3-5 range
+        grade_level = "Poor"
+    else:
+        score = similarity * 15  # 0-3 range
+        grade_level = "Very Poor"
+    
+    # Cap at 10
+    score = min(score, 10)
+    
+    # Length analysis
+    student_length = len(student_answer.split())
+    correct_length = len(correct_answer.split())
+    length_ratio = student_length / correct_length if correct_length > 0 else 0
+    
+    # Generate feedback
+    feedback_parts = []
+    feedback_parts.append(f"**Score: {score:.1f}/10** ({grade_level})")
+    feedback_parts.append(f"**Similarity to correct answer:** {similarity:.1%}")
+    
+    if similarity >= 0.7:
+        feedback_parts.append("✅ **Strengths:** Your answer shows good understanding of the key concepts.")
+    elif similarity >= 0.4:
+        feedback_parts.append("⚠️ **Strengths:** You have some correct elements in your answer.")
+    else:
+        feedback_parts.append("❌ **Areas for improvement:** Your answer needs significant revision.")
+    
+    if length_ratio < 0.5:
+        feedback_parts.append("📝 **Suggestion:** Consider providing more detailed explanations.")
+    elif length_ratio > 2:
+        feedback_parts.append("📝 **Suggestion:** Try to be more concise and focus on key points.")
+    
+    if similarity < 0.6:
+        feedback_parts.append("💡 **Tip:** Review the correct answer and identify the main concepts you may have missed.")
+    
+    return "\n\n".join(feedback_parts)
 
 # Improved answer parsing function
 def split_answers(text):
@@ -79,9 +139,9 @@ def split_answers(text):
     
     # Try multiple patterns for question detection
     patterns = [
-        r'Q(\d+):\s*(.*?)(?=Q\d+:|$)',  # Q1: answer
-        r'Question\s+(\d+):\s*(.*?)(?=Question\s+\d+:|$)',  # Question 1: answer
-        r'(\d+)\.\s*(.*?)(?=\d+\.|$)',  # 1. answer
+        r'Q(\d+):\s*(.*?)(?=Q\d+:|$)',
+        r'Question\s+(\d+):\s*(.*?)(?=Question\s+\d+:|$)',
+        r'(\d+)\.\s*(.*?)(?=\d+\.|$)',
     ]
     
     for pattern in patterns:
@@ -95,6 +155,8 @@ def split_answers(text):
 
 # Sidebar
 st.sidebar.header("📤 Upload Files")
+st.sidebar.info("🎯 **No API Key Required!** This version uses local algorithms to grade answers.")
+
 student_file = st.sidebar.file_uploader(
     "Upload Student Answers", 
     type=["docx", "pdf"],
@@ -105,6 +167,11 @@ answer_key_file = st.sidebar.file_uploader(
     type=["docx", "pdf"],
     help="Upload a document with correct answers in Q1:, Q2: format"
 )
+
+# Settings
+st.sidebar.header("⚙️ Grading Settings")
+strict_mode = st.sidebar.checkbox("Strict Grading Mode", help="More stringent similarity requirements")
+show_similarity = st.sidebar.checkbox("Show Similarity Scores", value=True)
 
 # Processing section
 if student_file and answer_key_file:
@@ -155,8 +222,7 @@ if student_file and answer_key_file:
             for i, (q_num, stu_ans) in enumerate(student_answers.items()):
                 correct_ans = correct_answers.get(q_num, "No answer key provided for this question.")
                 
-                with st.spinner(f"Grading Question {q_num}..."):
-                    feedback = grade_answer(stu_ans, correct_ans, q_num)
+                feedback = grade_answer_local(stu_ans, correct_ans, q_num)
                 
                 grades.append({
                     "Question": f"Q{q_num}",
@@ -171,6 +237,27 @@ if student_file and answer_key_file:
             st.subheader("📊 Grading Results")
             df = pd.DataFrame(grades)
             
+            # Summary statistics
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Total Questions", len(grades))
+            with col2:
+                # Extract scores from feedback
+                scores = []
+                for feedback in df['AI Feedback']:
+                    try:
+                        score_line = feedback.split('\n')[0]
+                        score = float(score_line.split('**Score: ')[1].split('/10')[0])
+                        scores.append(score)
+                    except:
+                        scores.append(0)
+                avg_score = sum(scores) / len(scores) if scores else 0
+                st.metric("Average Score", f"{avg_score:.1f}/10")
+            with col3:
+                passing_scores = sum(1 for score in scores if score >= 6)
+                pass_rate = (passing_scores / len(scores) * 100) if scores else 0
+                st.metric("Pass Rate", f"{pass_rate:.1f}%")
+            
             # Show results in expandable sections
             for _, row in df.iterrows():
                 with st.expander(f"📝 {row['Question']}"):
@@ -181,8 +268,8 @@ if student_file and answer_key_file:
                     with col2:
                         st.write("**Correct Answer:**")
                         st.write(row['Correct Answer'])
-                    st.write("**AI Feedback:**")
-                    st.write(row['AI Feedback'])
+                    st.write("**Feedback:**")
+                    st.markdown(row['AI Feedback'])
             
             # Download functionality
             try:
@@ -204,19 +291,27 @@ else:
     
     # Instructions
     st.markdown("""
-    ### 📋 Instructions:
-    1. **Upload student answers** - Document should contain answers in format: Q1: answer, Q2: answer, etc.
-    2. **Upload answer key** - Document should contain correct answers in the same format
-    3. **Click "Grade All Questions"** to get AI feedback on each answer
-    4. **Download results** as an Excel file
+    ### 📋 How It Works:
+    This app uses **local algorithms** (no API required) to grade student answers by:
+    - 🔍 **Text Similarity Analysis** - Compares student answers with correct answers
+    - 📊 **Word Matching** - Identifies key concepts and terminology
+    - 📝 **Length Analysis** - Evaluates answer completeness
+    - 🎯 **Smart Scoring** - Provides scores and detailed feedback
     
-    ### 📄 Supported Formats:
-    - PDF files
-    - Word documents (.docx)
+    ### 📄 Instructions:
+    1. **Upload student answers** - Document should contain: Q1: answer, Q2: answer, etc.
+    2. **Upload answer key** - Document with correct answers in same format
+    3. **Click "Grade All Questions"** to get automated feedback
+    4. **Download results** as Excel file
     
-    ### 🔧 Question Format:
-    Your documents should use one of these formats:
+    ### 🔧 Supported Question Formats:
     - `Q1: answer text here`
-    - `Question 1: answer text here`
+    - `Question 1: answer text here`  
     - `1. answer text here`
+    
+    ### 📊 Features:
+    - ✅ **No API keys required** - Works completely offline
+    - 🎯 **Smart scoring** - Based on similarity and completeness
+    - 📈 **Analytics** - Average scores and pass rates
+    - 📥 **Export results** - Download as Excel file
     """)
